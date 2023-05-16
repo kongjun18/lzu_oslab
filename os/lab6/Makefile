@@ -84,7 +84,7 @@ format:
 	@find . -regex '.*\.\(c\|h\)' -exec clang-format -i {} \;
 
 compiledb:
-	@$(MAKE) clean
+	@-$(MAKE) clean
 	@$(BEAR) -- $(MAKE)
 
 env:
