@@ -113,17 +113,17 @@ struct kmem_cache *find_kmalloc_cache(uint64_t size, gfp_t flags) {
 }
 
 static inline int objp_cache_full(struct objp_cache *objp_cache) {
-    assert(objp_cache->avail < objp_cache->capacity && objp_cache->avail >= -1);
-    return objp_cache->avail + 1 == objp_cache->capacity;
+    assert(objp_cache->avail && objp_cache->avail <= objp_cache->capacity);
+    return objp_cache->avail == objp_cache->capacity;
 }
 
 static inline int objp_cache_empty(struct objp_cache *objp_cache) {
-    assert(objp_cache->avail < objp_cache->capacity && objp_cache->avail >= -1);
-    return objp_cache->avail == -1;
+    assert(objp_cache->avail && objp_cache->avail <= objp_cache->capacity);
+    return !objp_cache->avail;
 }
 
-static inline void slabmgt_init(struct kmem_cache *cachep, struct slabmgt *slabmgt,
-                             void *slab_block) {
+static inline void slabmgt_init(struct kmem_cache *cachep,
+                                struct slabmgt *slabmgt, void *slab_block) {
     slabmgt->color_off = cachep->color_next * cachep->color_off;
     slabmgt->color_off += off_slab(cachep) ? 0 : cachep->slabmgt_size;
     slabmgt->inuse = 0;
@@ -173,7 +173,7 @@ static struct objp_cache *alloc_objp_cache(int32_t capacity,
                                            int32_t batch_count) {
     struct objp_cache *p = (struct objp_cache *)kmalloc(
         sizeof(struct objp_cache) + capacity * sizeof(p->data), GFP_KERNEL);
-    p->avail = -1;
+    p->avail = 0;
     p->batch_count = batch_count;
     p->capacity = capacity;
     p->touched = 0;
@@ -437,7 +437,7 @@ static void *cache_alloc_refill(struct kmem_cache *cachep, gfp_t flags) {
         struct slabmgt *slabmgt = container_of(list_node, struct slabmgt, list);
         while (slabmgt->inuse < cachep->obj_num && batch_count--) {
             void *objp = slabmgt->mem + slabmgt->free * cachep->obj_size;
-            objp_cache->data[++objp_cache->avail] = objp;
+            objp_cache->data[objp_cache->avail++] = objp;
             slabmgt->free = slabmgt->freelist[slabmgt->free];
             slabmgt->inuse++;
         }
