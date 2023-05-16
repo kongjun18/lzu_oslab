@@ -158,8 +158,10 @@ static struct slabmgt *alloc_slab(struct kmem_cache *cachep, gfp_t flags) {
     if (!pages) {
         return NULL;
     }
+    cachep->color_next = (cachep->color_next + 1) & (cachep->color - 1);
     void *slab_block = (void *)page_to_va(pages);
-    struct slabmgt *slabmgt = (struct slabmgt *)slab_block;
+    struct slabmgt *slabmgt =
+        (struct slabmgt *)(slab_block + cachep->color_next * cachep->color_off);
     if (off_slab(cachep)) {
         assert(cachep->slabp_cache);
         slabmgt = kmem_cache_alloc(cachep->slabp_cache, GFP_KERNEL);
