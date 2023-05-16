@@ -468,6 +468,8 @@ static void *cache_alloc_refill(struct kmem_cache *cachep, gfp_t flags) {
             linked_list_push(&cachep->slab_partial, list_node);
         }
     }
+    // TODO(kongjun18): clear `touched` periodically
+    objp_cache->touched = 1;
     cachep->free_objs--;
     assert(!objp_cache_empty(objp_cache));
     return objp_cache->data[--objp_cache->avail];
@@ -477,6 +479,7 @@ void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags) {
     struct objp_cache *objp_cache = cachep->objp_cache;
     if (!objp_cache_empty(objp_cache)) {
         cachep->free_objs--;
+        objp_cache->touched = 1;
         return objp_cache->data[--objp_cache->avail];
     }
     return cache_alloc_refill(cachep, flags);
