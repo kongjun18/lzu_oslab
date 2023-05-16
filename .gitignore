@@ -58,6 +58,10 @@ Temporary Items
 .apdisk
 
 ### Vim ###
+# nvimrc
+.nvim.lua
+.nvimrc
+
 # Swap
 [._]*.s[a-v][a-z]
 !*.svg
@@ -93,6 +97,10 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+### LSP ###
+compile_commands.json
+.cache
+
 ### Virual Studio Code ###
 # Workspace config
 .vscode/
@@ -100,6 +108,7 @@ $RECYCLE.BIN/
 *.code-workspace
 
 ### LZU OSLab ###
+build/
 vsc_diag_suppress.h
 doc/html/
 *.img
