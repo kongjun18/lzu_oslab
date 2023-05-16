@@ -28,7 +28,7 @@ struct kmem_cache {
 
     uint32_t obj_size;
     uint32_t obj_num;
-    uint32_t slab_size;
+    uint32_t slabmgt_size;
     uint32_t free_limit;
 
     struct kmem_cache *slabp_cache;
@@ -63,12 +63,13 @@ void *kmem_cache_alloc(struct kmem_cache *cachep, uint32_t flags);
 void kmem_cache_free(struct kmem_cache *cachep, void *buf);
 void kmem_cache_destroy(struct kmem_cache *cachep);
 
-struct slab {
+struct slabmgt {
     uint32_t color_off;
     void *mem;
     uint32_t inuse;
     struct linked_list_node list;
-    kmem_bufctl_t freelist;
+    kmem_bufctl_t free;
+    kmem_bufctl_t freelist[0];
 };
 
 enum kmalloc_type {

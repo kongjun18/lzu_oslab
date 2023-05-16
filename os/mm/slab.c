@@ -1,3 +1,5 @@
+#include "utils/linked_list.h"
+#include <assert.h>
 #include <bitops.h>
 #include <compiler.h>
 #include <mm.h>
@@ -69,7 +71,7 @@ static void cache_estimate(uint32_t order, uint32_t obj_size, uint32_t align,
     obj_size = ALIGN(obj_size, align);
     uint32_t slabmgt_size = 0;
     uint32_t bufctl_size = sizeof(kmem_bufctl_t);
-    uint32_t base_size = sizeof(struct slab);
+    uint32_t base_size = sizeof(struct slabmgt);
     uint32_t i = 0;
     uint32_t used_size = 0;
     if (flags & __KMEM_OFF_SLAB) {
@@ -90,16 +92,16 @@ static void cache_estimate(uint32_t order, uint32_t obj_size, uint32_t align,
     slabmgt_size = ALIGN(base_size + bufctl_size * i, align);
     used_size = slabmgt_size + i * obj_size;
     *left_over = block_size - used_size;
-    // OFF_SLAB slab management streu is allocated from kmalloc. Therefore
-    // there is no need to align it.
+    // OFF_SLAB slabmgt is allocated from kmalloc.
+    // Therefore there is no need to align it.
     *slab_size = (flags & __KMEM_OFF_SLAB) ?
-                     (sizeof(kmem_bufctl_t) * i + sizeof(struct slab)) :
+                     (sizeof(kmem_bufctl_t) * i + sizeof(struct slabmgt)) :
                      slabmgt_size;
 }
 
-struct kmem_cache *find_kmalloc_cache(uint64_t size, uint32_t flags) {
+struct kmem_cache *find_kmalloc_cache(uint64_t size, gfp_t flags) {
     uint32_t kmalloc_type = KMALLOC_NORMAL;
-    if (flags & SLAB_CACHE_DMA) {
+    if (flags & ZONE_DMA) {
         kmalloc_type = KMALLOC_DMA;
     }
     for (int i = 0; i < NR_KMALLOC_CACHES; ++i) {
@@ -110,8 +112,47 @@ struct kmem_cache *find_kmalloc_cache(uint64_t size, uint32_t flags) {
     return NULL;
 }
 
-__unused static struct slab *alloc_slabmgt() {
-    return NULL;
+static inline int objp_cache_full(struct objp_cache *objp_cache) {
+    assert(objp_cache->avail < objp_cache->capacity && objp_cache->avail >= -1);
+    return objp_cache->avail + 1 == objp_cache->capacity;
+}
+
+static inline int objp_cache_empty(struct objp_cache *objp_cache) {
+    assert(objp_cache->avail < objp_cache->capacity && objp_cache->avail >= -1);
+    return objp_cache->avail == -1;
+}
+
+static inline void slabmgt_init(struct kmem_cache *cachep, struct slabmgt *slabmgt,
+                             void *slab_block) {
+    slabmgt->color_off = cachep->color_next * cachep->color_off;
+    slabmgt->color_off += off_slab(cachep) ? 0 : cachep->slabmgt_size;
+    slabmgt->inuse = 0;
+    linked_list_init(&slabmgt->list);
+    uint32_t i = 0;
+    for (i = 0; i + 1 < cachep->obj_num; ++i) {
+        slabmgt->freelist[i] = i + 1;
+    }
+    slabmgt->freelist[i] = BUFCTL_END;
+    slabmgt->free = 0;
+    slabmgt->mem = slab_block + slabmgt->color_off;
+}
+
+static struct slabmgt *alloc_slab(struct kmem_cache *cachep, gfp_t flags) {
+    struct page *pages = alloc_pages(cachep->order, flags);
+    if (!pages) {
+        return NULL;
+    }
+    void *slab_block = (void *)page_to_va(pages);
+    struct slabmgt *slabmgt = (struct slabmgt *)slab_block;
+    if (off_slab(cachep)) {
+        assert(cachep->slabp_cache);
+        slabmgt = kmem_cache_alloc(cachep->slabp_cache, GFP_KERNEL);
+        if (!slabmgt) {
+            return NULL;
+        }
+    }
+    slabmgt_init(cachep, slabmgt, slab_block);
+    return slabmgt;
 }
 
 __unused static void *cache_get_pages(uint32_t order, gfp_t flags) {
@@ -121,7 +162,7 @@ __unused static void *cache_get_pages(uint32_t order, gfp_t flags) {
 __unused static void cache_free_pages(struct page *page, uint32_t order) {
 }
 
-__unused static void destory_slab(struct slab *slab) {
+__unused static void destory_slab(struct slabmgt *slab) {
 }
 
 static void free_objp_block(struct kmem_cache *cachep, void *objpp[],
@@ -132,7 +173,7 @@ static struct objp_cache *alloc_objp_cache(int32_t capacity,
                                            int32_t batch_count) {
     struct objp_cache *p = (struct objp_cache *)kmalloc(
         sizeof(struct objp_cache) + capacity * sizeof(p->data), GFP_KERNEL);
-    p->avail = 0;
+    p->avail = -1;
     p->batch_count = batch_count;
     p->capacity = capacity;
     p->touched = 0;
@@ -200,7 +241,7 @@ void kmem_cache_init() __init {
     }
     uint32_t left_over = 0;
     cache_estimate(kmem_cache.order, kmem_cache.obj_size, cache_line_size(),
-                   kmem_cache.flags, &left_over, &kmem_cache.slab_size,
+                   kmem_cache.flags, &left_over, &kmem_cache.slabmgt_size,
                    &kmem_cache.obj_num);
     assert(kmem_cache.obj_num, "kmem_cache_init: kmem_cache obj_num is 0");
     kmem_cache.color = left_over / kmem_cache.color_off;
@@ -220,7 +261,7 @@ void kmem_cache_init() __init {
                 kmalloc_type == KMALLOC_DMA ? SLAB_CACHE_DMA : 0, NULL, NULL);
             if (!off_slab(kmalloc_cache)) {
                 off_slab_obj_limit =
-                    (kmalloc_cache->obj_size - sizeof(struct slab)) /
+                    (kmalloc_cache->obj_size - sizeof(struct slabmgt)) /
                     sizeof(kmem_bufctl_t);
             }
             kmalloc_caches[kmalloc_type][i] = kmalloc_cache;
@@ -287,11 +328,11 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
         flags |= __KMEM_OFF_SLAB;
     }
     uint32_t left_over = 0;
-    uint32_t slab_size = 0;
+    uint32_t slabmgt_size = 0;
     uint32_t obj_num = 0;
     do {
         cache_estimate(cachep->order, cachep->obj_size, align, flags,
-                       &left_over, &slab_size, &obj_num);
+                       &left_over, &slabmgt_size, &obj_num);
         if (!obj_num) {
             ++cachep->order;
         }
@@ -313,10 +354,11 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
             break;
     } while (1);
 
-    if ((flags & __KMEM_OFF_SLAB) && (left_over >= ALIGN(slab_size, align))) {
+    if ((flags & __KMEM_OFF_SLAB) &&
+        (left_over >= ALIGN(slabmgt_size, align))) {
         flags &= ~__KMEM_OFF_SLAB;
-        slab_size = ALIGN(slab_size, align);
-        left_over -= slab_size;
+        slabmgt_size = ALIGN(slabmgt_size, align);
+        left_over -= slabmgt_size;
     }
 
     cachep->color_off = cache_line_size();
@@ -329,7 +371,7 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
 
     cachep->obj_size = size;
     cachep->obj_num = obj_num;
-    cachep->slab_size = slab_size;
+    cachep->slabmgt_size = slabmgt_size;
     cachep->ctor = ctor;
     cachep->dtor = dtor;
     cachep->name = name;
@@ -340,7 +382,7 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
     cachep->free_objs = 0;
     cachep->slabp_cache =
         (flags & __KMEM_OFF_SLAB) ?
-            find_kmalloc_cache(cachep->slab_size, cachep->gfpflags) :
+            find_kmalloc_cache(cachep->slabmgt_size, cachep->gfpflags) :
             NULL;
 
     // Install `objp_cache` into cache
@@ -369,8 +411,54 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
     return cachep;
 }
 
-__unused void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags) {
-    return NULL;
+#define INACTIVE_BATCH_COUNT 12
+static void *cache_alloc_refill(struct kmem_cache *cachep, gfp_t flags) {
+    int32_t batch_count = cachep->objp_cache->batch_count;
+    struct objp_cache *objp_cache = cachep->objp_cache;
+    if (!objp_cache->touched &&
+        objp_cache->batch_count > INACTIVE_BATCH_COUNT) {
+        batch_count = INACTIVE_BATCH_COUNT;
+    }
+
+    while (batch_count > 0) {
+        struct linked_list_node *list_node = cachep->slab_partial.next;
+        if (list_node == &cachep->slab_partial) {
+            list_node = cachep->slab_empty.next;
+            if (list_node == &cachep->slab_empty) {
+                struct slabmgt *slabmgt = alloc_slab(cachep, flags);
+                if (!slabmgt) {
+                    return NULL;
+                }
+                linked_list_push(&cachep->slab_empty, &slabmgt->list);
+                cachep->free_objs += cachep->obj_num;
+                continue;
+            }
+        }
+        struct slabmgt *slabmgt = container_of(list_node, struct slabmgt, list);
+        while (slabmgt->inuse < cachep->obj_num && batch_count--) {
+            void *objp = slabmgt->mem + slabmgt->free * cachep->obj_size;
+            objp_cache->data[++objp_cache->avail] = objp;
+            slabmgt->free = slabmgt->freelist[slabmgt->free];
+            slabmgt->inuse++;
+        }
+        linked_list_remove(list_node);
+        if (slabmgt->inuse == cachep->obj_num) {
+            linked_list_push(&cachep->slab_full, list_node);
+        } else {
+            linked_list_push(&cachep->slab_partial, list_node);
+        }
+    }
+    cachep->free_objs--;
+    return objp_cache->data[--objp_cache->avail];
+}
+
+void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags) {
+    struct objp_cache *objp_cache = cachep->objp_cache;
+    if (!objp_cache_empty(objp_cache)) {
+        cachep->free_objs--;
+        return objp_cache->data[--objp_cache->avail];
+    }
+    return cache_alloc_refill(cachep, flags);
 }
 
 void kmem_cache_free(struct kmem_cache *cachep, void *buf) {
@@ -381,6 +469,6 @@ void kmem_cache_shrink(struct kmem_cache *cachep) {
 void kmem_cache_destroy(struct kmem_cache *cachep) {
 }
 
-void *kmalloc(uint64_t size, uint32_t flags) {
+void *kmalloc(uint64_t size, gfp_t flags) {
     return kmem_cache_alloc(find_kmalloc_cache(size, flags), flags);
 }
