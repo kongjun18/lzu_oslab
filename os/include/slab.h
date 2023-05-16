@@ -60,7 +60,7 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
                   void (*ctor)(void *, struct kmem_cache *, uint32_t),
                   void (*dtor)(void *, struct kmem_cache *, uint32_t));
 void *kmem_cache_alloc(struct kmem_cache *cachep, uint32_t flags);
-void kmem_cache_free(struct kmem_cache *cachep, void *buf);
+void kmem_cache_free(struct kmem_cache *cachep, void *obj);
 void kmem_cache_destroy(struct kmem_cache *cachep);
 
 struct slabmgt {
@@ -94,5 +94,7 @@ extern struct kmem_cache *kmalloc_caches[NR_KMALLOC_TYPES][NR_KMALLOC_CACHES];
 
 // `kmalloc()` allocates byte-sized chunk
 extern void *kmalloc(uint64_t size, uint32_t flags);
+// `kfree()` deallocates memory allocated by `kmalloc()`
+extern void kfree(void *mem);
 
 #endif /* __SLAB_H__ */
