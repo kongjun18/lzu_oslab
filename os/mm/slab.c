@@ -113,12 +113,14 @@ struct kmem_cache *find_kmalloc_cache(uint64_t size, gfp_t flags) {
 }
 
 static inline int objp_cache_full(struct objp_cache *objp_cache) {
-    assert(objp_cache->avail && objp_cache->avail <= objp_cache->capacity);
+    assert((objp_cache->avail >= 0) &&
+           (objp_cache->avail <= objp_cache->capacity));
     return objp_cache->avail == objp_cache->capacity;
 }
 
 static inline int objp_cache_empty(struct objp_cache *objp_cache) {
-    assert(objp_cache->avail && objp_cache->avail <= objp_cache->capacity);
+    assert((objp_cache->avail >= 0) &&
+           (objp_cache->avail <= objp_cache->capacity));
     return !objp_cache->avail;
 }
 
@@ -162,6 +164,11 @@ static inline uint64_t *redzone2(struct kmem_cache *cachep, void *obj) {
 
 static inline void *real_obj(struct kmem_cache *cachep, void *obj) {
     return cachep->flags & SLAB_RED_ZONE ? obj + BYTES_PER_WORD : obj;
+}
+
+static inline void *obj_head(struct kmem_cache *cachep, void *real_obj) {
+    return (cachep->flags & SLAB_RED_ZONE) ? real_obj - BYTES_PER_WORD :
+                                             real_obj;
 }
 
 static void posion_obj(struct kmem_cache *cachep, void *real_obj,
@@ -310,10 +317,6 @@ static void destory_slab(struct kmem_cache *cachep, struct slabmgt *slabmgt) {
     }
 }
 
-static void free_objp_block(struct kmem_cache *cachep, void *objpp[],
-                            int32_t count) {
-}
-
 static struct objp_cache *alloc_objp_cache(int32_t capacity,
                                            int32_t batch_count) {
     struct objp_cache *p = (struct objp_cache *)kmalloc(
@@ -324,6 +327,51 @@ static struct objp_cache *alloc_objp_cache(int32_t capacity,
     p->touched = 0;
     return p;
 }
+
+static inline struct kmem_cache *obj_to_cache(void *obj) {
+    assert(!obj);
+    struct page *slab_page = (struct page *)va_to_page(obj);
+    assert(slab_page->flags & PG_SLAB);
+    return (void *)(slab_page->lru.prev);
+}
+
+static inline struct slabmgt *obj_to_slabmgt(void *obj) {
+    assert(!obj);
+    struct page *slab_page = (struct page *)va_to_page(obj);
+    assert(slab_page->flags & PG_SLAB);
+    return (void *)(slab_page->lru.next);
+}
+
+static void cache_free_back(struct kmem_cache *cachep,
+                            struct objp_cache *objp_cache,
+                            int32_t batch_count) {
+    while (batch_count--) {
+        void *obj = obj_head(cachep, objp_cache->data[--objp_cache->avail]);
+        assert(obj_to_cache(obj) == cachep);
+        struct slabmgt *slabmgt = obj_to_slabmgt(obj);
+        uint32_t idx = (obj - slabmgt->mem) / cachep->obj_size;
+        slabmgt->freelist[idx] = slabmgt->freelist[slabmgt->free];
+        slabmgt->free = idx;
+        slabmgt->inuse--;
+        cachep->free_objs++;
+        linked_list_remove(&slabmgt->list);
+
+        if (!slabmgt->inuse) {
+            if (cachep->free_objs >= cachep->free_limit) {
+                destory_slab(cachep, slabmgt);
+                cachep->free_objs -= cachep->obj_num;
+                continue;
+            }
+        }
+
+        if (slabmgt->inuse) {
+            linked_list_push(&cachep->slab_partial, &slabmgt->list);
+        } else {
+            linked_list_push(&cachep->slab_empty, &slabmgt->list);
+        }
+    }
+}
+
 static void do_tune_obj_cache(struct kmem_cache *cachep, int32_t capacity,
                               int32_t batch_count) {
     struct objp_cache *new = alloc_objp_cache(capacity, batch_count);
@@ -332,7 +380,8 @@ static void do_tune_obj_cache(struct kmem_cache *cachep, int32_t capacity,
     }
     struct objp_cache *old = cachep->objp_cache;
     if (old) {
-        free_objp_block(cachep, old->data, old->batch_count);
+        cache_free_back(cachep, old, old->avail);
+        kfree(old);
     }
     cachep->objp_cache = new;
     cachep->free_limit = 2 * cachep->objp_cache->batch_count + cachep->obj_num;
@@ -624,54 +673,11 @@ void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags) {
     return obj;
 }
 
-static inline struct kmem_cache *obj_to_cache(void *obj) {
-    assert(!obj);
-    struct page *slab_page = (struct page *)va_to_page(obj);
-    assert(slab_page->flags & PG_SLAB);
-    return (void *)(slab_page->lru.prev);
-}
-
-static inline struct slabmgt *obj_to_slabmgt(void *obj) {
-    assert(!obj);
-    struct page *slab_page = (struct page *)va_to_page(obj);
-    assert(slab_page->flags & PG_SLAB);
-    return (void *)(slab_page->lru.next);
-}
-
-static void cache_free_back(struct kmem_cache *cachep,
-                            struct objp_cache *objp_cache) {
-    int32_t batch_count = objp_cache->batch_count;
-    while (batch_count--) {
-        void *obj = objp_cache->data[--objp_cache->avail];
-        assert(obj_to_cache(obj) == cachep);
-        struct slabmgt *slabmgt = obj_to_slabmgt(obj);
-        uint32_t idx = (obj - slabmgt->mem) / cachep->obj_size;
-        slabmgt->freelist[idx] = slabmgt->freelist[slabmgt->free];
-        slabmgt->free = idx;
-        slabmgt->inuse--;
-        cachep->free_objs++;
-        linked_list_remove(&slabmgt->list);
-
-        if (!slabmgt->inuse) {
-            if (cachep->free_objs >= cachep->free_limit) {
-                destory_slab(cachep, slabmgt);
-                cachep->free_objs -= cachep->obj_num;
-                continue;
-            }
-        }
-
-        if (slabmgt->inuse) {
-            linked_list_push(&cachep->slab_partial, &slabmgt->list);
-        } else {
-            linked_list_push(&cachep->slab_empty, &slabmgt->list);
-        }
-    }
-}
-
 void kmem_cache_free(struct kmem_cache *cachep, void *obj) {
     check_debug_before_free(cachep, obj);
     if (objp_cache_full(cachep->objp_cache)) {
-        cache_free_back(cachep, cachep->objp_cache);
+        cache_free_back(cachep, cachep->objp_cache,
+                        cachep->objp_cache->batch_count);
     }
     assert(!objp_cache_full(cachep->objp_cache));
     cachep->objp_cache->data[cachep->objp_cache->avail++] = obj;
