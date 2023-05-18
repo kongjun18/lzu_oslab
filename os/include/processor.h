@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <assert.h>
 
-#define BYTES_PER_WORD 64U
-static_assert((BYTES_PER_WORD >> 3) == sizeof(uint64_t), "not 64 bytes");
+#define BYTES_PER_WORD 8U
+static_assert(BYTES_PER_WORD == sizeof(uint64_t), "not 64 bytes");
 
 static inline uint32_t cpu_id() {
     return 0;
