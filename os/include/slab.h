@@ -27,6 +27,7 @@ struct kmem_cache {
     uint32_t flags;
 
     uint32_t obj_size;
+    uint32_t real_obj_size;
     uint32_t obj_num;
     uint32_t slabmgt_size;
     uint32_t free_limit;
@@ -83,14 +84,15 @@ extern struct kmem_cache *kmalloc_caches[NR_KMALLOC_TYPES][NR_KMALLOC_CACHES];
 // kmem_cache_create() flags
 #define SLAB_POSION 0x01U // Posion slab objs
 #define SLAB_RED_ZONE 0x02U // Eanble red zone
-#define SLAB_TRACE_USER 0x04U // Store last user in debug area
 #define SLAB_CACHE_DMA 0x08U // Allocate memory in DMA zone
 #define SLAB_PANIC 0x10U // Panic if `kmem_cache_create()` fails
-#define SLAB_DEBUG (SLAB_PANIC | SLAB_POSION | SLAB_RED_ZONE | SLAB_TRACE_USER)
+#define SLAB_DEBUG (SLAB_PANIC | SLAB_POSION | SLAB_RED_ZONE)
 #define SLAB_HW_CACHE_ALIGN 0x20U // Align to hardware cache line
 #define SLAB_ALLOWD_FLAGS                                                      \
-    (SLAB_POSION | SLAB_RED_ZONE | SLAB_TRACE_USER | SLAB_CACHE_DMA |          \
-     SLAB_PANIC | SLAB_HW_CACHE_ALIGN)
+    (SLAB_POSION | SLAB_RED_ZONE | SLAB_CACHE_DMA | SLAB_PANIC |               \
+     SLAB_HW_CACHE_ALIGN)
+
+#define CTOR_ATOMIC 0x01U // Indicate constructor is running in atomic context
 
 // `kmalloc()` allocates byte-sized chunk
 extern void *kmalloc(uint64_t size, uint32_t flags);

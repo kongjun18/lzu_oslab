@@ -147,10 +147,134 @@ static void slab_attr_init(struct kmem_cache *cachep, struct slabmgt *slabmgt,
     }
 }
 
+#define REDZONE_INACTIVE (0UL)
+#define REDZONE_ACTIVE (~0UL)
+#define OBJ_INUSE 0xdeadbeefUL
+#define OBJ_FREE 0xbeefdeadUL
+
+static inline uint64_t *redzone1(struct kmem_cache *cachep, void *obj) {
+    return obj;
+}
+
+static inline uint64_t *redzone2(struct kmem_cache *cachep, void *obj) {
+    return obj + BYTES_PER_WORD + cachep->obj_size;
+}
+
+static inline void *real_obj(struct kmem_cache *cachep, void *obj) {
+    return cachep->flags & SLAB_RED_ZONE ? obj + BYTES_PER_WORD : obj;
+}
+
+static void posion_obj(struct kmem_cache *cachep, void *real_obj,
+                       uint64_t val) {
+    for (uint32_t i = 0; i < cachep->real_obj_size; i += BYTES_PER_WORD) {
+        *(uint64_t *)(real_obj + i) = val;
+    }
+}
+
+static void check_posion(struct kmem_cache *cachep, void *real_obj,
+                         uint64_t val) {
+    for (uint32_t i = 0; i < cachep->real_obj_size; i += BYTES_PER_WORD) {
+        if (*(uint64_t *)(real_obj + i) != val) {
+            panic("slab alloctor: detec use-after-free on obj %x\n", real_obj);
+        }
+    }
+}
+
+static void check_debug_before_alloc(struct kmem_cache *cachep, void *real_obj,
+                                     gfp_t flags) {
+    void *obj =
+        cachep->flags & SLAB_RED_ZONE ? real_obj - BYTES_PER_WORD : real_obj;
+    if (cachep->flags & SLAB_RED_ZONE) {
+        if (*redzone1(cachep, obj) != REDZONE_INACTIVE) {
+            panic("slab alloctor: detect buffer overflow on obj %x", real_obj);
+        }
+        if (*redzone2(cachep, obj) != REDZONE_INACTIVE) {
+            panic("slab alloctor: detect buffer overflow on obj %x", real_obj);
+        }
+        *redzone1(cachep, obj) = REDZONE_ACTIVE;
+        *redzone2(cachep, obj) = REDZONE_ACTIVE;
+    }
+    if (cachep->flags & SLAB_POSION) {
+        check_posion(cachep, real_obj, OBJ_INUSE);
+    }
+
+    if (cachep->flags & SLAB_POSION && cachep->ctor) {
+        cachep->ctor(cachep, real_obj, flags & GFP_ATOMIC ? CTOR_ATOMIC : 0);
+    }
+}
+
+static void check_debug_before_free(struct kmem_cache *cachep, void *real_obj) {
+    void *obj =
+        cachep->flags & SLAB_RED_ZONE ? real_obj - BYTES_PER_WORD : real_obj;
+    if (cachep->flags & SLAB_RED_ZONE) {
+        if (*redzone1(cachep, obj) != REDZONE_ACTIVE) {
+            panic("slab allocator: detect buffer underflow on obj %x",
+                  real_obj);
+        }
+        if (*redzone2(cachep, obj) != REDZONE_ACTIVE) {
+            panic("slab allocator: detect buffer underflow on obj %x",
+                  real_obj);
+        }
+        *redzone1(cachep, obj) = REDZONE_INACTIVE;
+        *redzone2(cachep, obj) = REDZONE_INACTIVE;
+    }
+    if (cachep->flags & SLAB_POSION) {
+        if (cachep->dtor) {
+            cachep->dtor(cachep, real_obj, 0);
+        }
+        posion_obj(cachep, real_obj, OBJ_FREE);
+    }
+}
+
+static void check_debug_before_destory(struct kmem_cache *cachep,
+                                       struct slabmgt *slabmgt) {
+    for (uint32_t i = 0; i < cachep->obj_num; ++i) {
+        void *obj = slabmgt->mem + (i * cachep->obj_size);
+        if (cachep->flags & SLAB_RED_ZONE) {
+            if (*redzone1(cachep, obj) != REDZONE_INACTIVE) {
+                panic("slab alloctor: detect buffer underflow on obj %x",
+                      real_obj(cachep, obj));
+            }
+            if (*redzone2(cachep, obj) != REDZONE_INACTIVE) {
+                panic("slab alloctor: detect buffer underflow on obj %x",
+                      real_obj(cachep, obj));
+            }
+        }
+        if (cachep->flags & SLAB_POSION) {
+            check_posion(cachep, real_obj(cachep, obj), OBJ_FREE);
+        }
+        if (!(cachep->flags & SLAB_POSION) && cachep->dtor) {
+            cachep->dtor(cachep, real_obj(cachep, obj), 0);
+        }
+    }
+}
+
 static void slab_init(struct kmem_cache *cachep, struct slabmgt *slabmgt,
-                      void *slab_block) {
+                      void *slab_block, gfp_t flags) {
     slabmgt_init(cachep, slabmgt, slab_block);
     slab_attr_init(cachep, slabmgt, slab_block);
+    if (cachep->flags & SLAB_RED_ZONE) {
+        for (uint32_t i = 0; i < cachep->obj_num; ++i) {
+            void *obj = slabmgt->mem + (i * cachep->obj_size);
+            *redzone1(cachep, obj) = REDZONE_INACTIVE;
+            *redzone2(cachep, obj) = REDZONE_INACTIVE;
+        }
+    }
+    if (cachep->flags & SLAB_POSION) {
+        static_assert(BYTES_PER_WORD == sizeof(uint64_t), "not 64 bytes");
+        for (uint32_t i = 0; i < cachep->obj_num; ++i) {
+            void *obj = real_obj(cachep, slabmgt->mem + (i * cachep->obj_size));
+            posion_obj(cachep, obj, OBJ_INUSE);
+        }
+    } else {
+        if (cachep->ctor) {
+            for (uint32_t i = 0; i < cachep->obj_num; ++i) {
+                void *obj =
+                    real_obj(cachep, slabmgt->mem + (i * cachep->obj_size));
+                cachep->ctor(obj, cachep, flags & GFP_ATOMIC ? CTOR_ATOMIC : 0);
+            }
+        }
+    }
 }
 
 static struct slabmgt *alloc_slab(struct kmem_cache *cachep, gfp_t flags) {
@@ -169,11 +293,12 @@ static struct slabmgt *alloc_slab(struct kmem_cache *cachep, gfp_t flags) {
             return NULL;
         }
     }
-    slab_init(cachep, slabmgt, slab_block);
+    slab_init(cachep, slabmgt, slab_block, flags);
     return slabmgt;
 }
 
 static void destory_slab(struct kmem_cache *cachep, struct slabmgt *slabmgt) {
+    check_debug_before_destory(cachep, slabmgt);
     if (off_slab(cachep)) {
         assert(slabmgt->mem);
         struct page *slab_page = va_to_page(slabmgt->mem);
@@ -324,6 +449,7 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
     }
 
     size = ALIGN(size, BYTES_PER_WORD);
+    uint32_t real_obj_size = size;
     uint64_t ralign = BYTES_PER_WORD;
     if (flags & SLAB_HW_CACHE_ALIGN) {
         for (ralign = cache_line_size(); size <= ralign; ralign /= 2) {
@@ -332,6 +458,15 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
     // If align is zero, use default align.
     if (ralign < align) {
         ralign = align;
+    }
+    if (flags & SLAB_RED_ZONE) {
+        if (ralign > BYTES_PER_WORD) {
+            flags &= ~(SLAB_RED_ZONE);
+        } else {
+            ralign = BYTES_PER_WORD;
+            real_obj_size += 2 * BYTES_PER_WORD;
+            size += 2 * BYTES_PER_WORD;
+        }
     }
     align = ralign;
 
@@ -390,6 +525,7 @@ kmem_cache_create(const char *name, uint64_t size, uint64_t align,
     }
 
     cachep->obj_size = size;
+    cachep->real_obj_size = real_obj_size;
     cachep->obj_num = obj_num;
     cachep->slabmgt_size = slabmgt_size;
     cachep->ctor = ctor;
@@ -456,7 +592,8 @@ static void *cache_alloc_refill(struct kmem_cache *cachep, gfp_t flags) {
         }
         struct slabmgt *slabmgt = container_of(list_node, struct slabmgt, list);
         while (slabmgt->inuse < cachep->obj_num && batch_count--) {
-            void *objp = slabmgt->mem + slabmgt->free * cachep->obj_size;
+            void *objp = real_obj(cachep, slabmgt->mem +
+                                              slabmgt->free * cachep->obj_size);
             objp_cache->data[objp_cache->avail++] = objp;
             slabmgt->free = slabmgt->freelist[slabmgt->free];
             slabmgt->inuse++;
@@ -482,7 +619,9 @@ void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags) {
         objp_cache->touched = 1;
         return objp_cache->data[--objp_cache->avail];
     }
-    return cache_alloc_refill(cachep, flags);
+    void *obj = cache_alloc_refill(cachep, flags);
+    check_debug_before_alloc(cachep, obj, flags);
+    return obj;
 }
 
 static inline struct kmem_cache *obj_to_cache(void *obj) {
@@ -530,6 +669,7 @@ static void cache_free_back(struct kmem_cache *cachep,
 }
 
 void kmem_cache_free(struct kmem_cache *cachep, void *obj) {
+    check_debug_before_free(cachep, obj);
     if (objp_cache_full(cachep->objp_cache)) {
         cache_free_back(cachep, cachep->objp_cache);
     }
